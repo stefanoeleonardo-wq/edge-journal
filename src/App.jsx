@@ -14,8 +14,8 @@ import {
 } from "lucide-react";
 
 // ── Supabase config ───────────────────────────────────────────────────────────
-const SUPA_URL = "https://ymdzrhdbogdpsoflkxva.supabase.co";
-const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InltZHpyaGRib2dkcHNvZmxreHZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1MTkwNzcsImV4cCI6MjA5NTA5NTA3N30.iQwOpGgCXGrtSF0ZDePEFb-amoWFdeyWTCm8LixUWoI";
+const SUPA_URL = import.meta.env.VITE_SUPA_URL || "https://ymdzrhdbogdpsoflkxva.supabase.co";
+const SUPA_KEY = import.meta.env.VITE_SUPA_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InltZHpyaGRib2dkcHNvZmxreHZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1MTkwNzcsImV4cCI6MjA5NTA5NTA3N30.iQwOpGgCXGrtSF0ZDePEFb-amoWFdeyWTCm8LixUWoI";
 
 const getUserId = () => {
   let uid = localStorage.getItem("ej_uid");
