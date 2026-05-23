@@ -45,16 +45,20 @@ const dbLoad = async (table, fallback) => {
 const dbSave = async (table, items) => {
   try {
     const uid = getUserId();
+    if (!items.length) return;
+    // Upsert all current items
     const rows = items.map(item => ({ id: item.id, user_id: uid, data: item, updated_at: new Date().toISOString() }));
-    if (!rows.length) return;
     await supaFetch(table, { method: "POST", body: JSON.stringify(rows), headers: { "Prefer": "resolution=merge-duplicates" } });
+    // Delete rows no longer in list
     const existing = await supaFetch(`${table}?user_id=eq.${uid}&select=id`);
-    if (existing) {
-      const currentIds = new Set(items.map(i => i.id));
-      const toDelete = existing.filter(r => !currentIds.has(r.id)).map(r => r.id);
-      if (toDelete.length) await supaFetch(`${table}?id=in.(${toDelete.join(",")})&user_id=eq.${uid}`, { method: "DELETE" });
+    if (existing && existing.length) {
+      const currentIds = new Set(items.map(i => String(i.id)));
+      const toDelete = existing.filter(r => !currentIds.has(String(r.id))).map(r => r.id);
+      if (toDelete.length) {
+        await supaFetch(`${table}?user_id=eq.${uid}&id=in.(${toDelete.join(",")})`, { method: "DELETE" });
+      }
     }
-  } catch (e) { console.error("dbSave", e); }
+  } catch (e) { console.error("dbSave error", table, e); }
 };
 
 const lsLoad = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
@@ -607,22 +611,26 @@ export default function TradingJournal() {
   const saveTimer = useRef({});
 
   // ── Load from Supabase on mount ──────────────────────────────────────────
+  const loadedRef = useRef(false);
+
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
-        // Load trades
+        // Load trades from Supabase
         let loadedTrades = await dbLoad("trades", null);
         if (loadedTrades === null) {
-          // First time: migrate from localStorage if exists
+          // First time ever: check localStorage migration
           loadedTrades = lsLoad("ej_trades_v4", []);
         }
-        // Inject seed trades if not already present
+        // Inject seed trades only once (tracked in localStorage)
         if (!localStorage.getItem("ej_seed_done")) {
           const ids = new Set(loadedTrades.map(t => t.id));
           const seeds = NOTION_TRADES.filter(t => !ids.has(t.id));
-          loadedTrades = [...seeds, ...loadedTrades];
+          if (seeds.length) loadedTrades = [...seeds, ...loadedTrades];
           localStorage.setItem("ej_seed_done", "1");
+          // Save seeds to Supabase immediately
+          if (loadedTrades.length) await dbSave("trades", loadedTrades);
         }
         setTrades(loadedTrades);
 
@@ -633,22 +641,25 @@ export default function TradingJournal() {
         console.error(e);
         setSyncStatus("error");
       }
+      // Mark load as complete — saves will now be enabled
+      loadedRef.current = true;
       setLoading(false);
     })();
   }, []);
 
-  // ── Debounced save to Supabase ───────────────────────────────────────────
+  // ── Debounced save to Supabase (only after initial load) ─────────────────
   const debouncedSave = useCallback((table, items) => {
+    if (!loadedRef.current) return; // never save during load
     if (saveTimer.current[table]) clearTimeout(saveTimer.current[table]);
     setSyncStatus("saving");
     saveTimer.current[table] = setTimeout(async () => {
       try { await dbSave(table, items); setSyncStatus("synced"); }
-      catch { setSyncStatus("error"); }
-    }, 1000);
+      catch (e) { console.error(e); setSyncStatus("error"); }
+    }, 1200);
   }, []);
 
-  useEffect(() => { if (!loading) debouncedSave("trades", trades); }, [trades, loading]);
-  useEffect(() => { if (!loading) debouncedSave("journal", journal); }, [journal, loading]);
+  useEffect(() => { debouncedSave("trades", trades); }, [trades]);
+  useEffect(() => { debouncedSave("journal", journal); }, [journal]);
 
   const [tradeForm, setTradeForm] = useState(null);
   const [journalForm, setJournalForm] = useState(null);
