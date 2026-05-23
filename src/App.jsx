@@ -13,55 +13,11 @@ import {
   ArrowUpRight, ArrowDownRight, Calendar, Flame, BarChart3
 } from "lucide-react";
 
-// ── Supabase config ───────────────────────────────────────────────────────────
-const SUPA_URL = import.meta.env.VITE_SUPA_URL || "https://ymdzrhdbogdpsoflkxva.supabase.co";
-const SUPA_KEY = import.meta.env.VITE_SUPA_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InltZHpyaGRib2dkcHNvZmxreHZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1MTkwNzcsImV4cCI6MjA5NTA5NTA3N30.iQwOpGgCXGrtSF0ZDePEFb-amoWFdeyWTCm8LixUWoI";
-
-const getUserId = () => {
-  let uid = localStorage.getItem("ej_uid");
-  if (!uid) { uid = "user_" + Math.random().toString(36).slice(2, 11); localStorage.setItem("ej_uid", uid); }
-  return uid;
-};
-
-const supaFetch = async (path, opts = {}) => {
-  const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
-    headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${SUPA_KEY}`, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates", ...opts.headers },
-    ...opts
-  });
-  if (!res.ok) { const e = await res.text(); throw new Error(e); }
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-};
-
-const dbLoad = async (table, fallback) => {
-  try {
-    const uid = getUserId();
-    const rows = await supaFetch(`${table}?user_id=eq.${uid}&select=id,data`);
-    if (!rows || !rows.length) return fallback;
-    return rows.map(r => r.data);
-  } catch (e) { console.error("dbLoad", e); return fallback; }
-};
-
-const dbSave = async (table, items) => {
-  try {
-    const uid = getUserId();
-    if (!items.length) return;
-    // Upsert all current items
-    const rows = items.map(item => ({ id: item.id, user_id: uid, data: item, updated_at: new Date().toISOString() }));
-    await supaFetch(table, { method: "POST", body: JSON.stringify(rows), headers: { "Prefer": "resolution=merge-duplicates" } });
-    // Delete rows no longer in list
-    const existing = await supaFetch(`${table}?user_id=eq.${uid}&select=id`);
-    if (existing && existing.length) {
-      const currentIds = new Set(items.map(i => String(i.id)));
-      const toDelete = existing.filter(r => !currentIds.has(String(r.id))).map(r => r.id);
-      if (toDelete.length) {
-        await supaFetch(`${table}?user_id=eq.${uid}&id=in.(${toDelete.join(",")})`, { method: "DELETE" });
-      }
-    }
-  } catch (e) { console.error("dbSave error", table, e); }
-};
-
+// ── Storage: localStorage ────────────────────────────────────────────────────
+const LS_TRADES = "ej_trades_v5";
+const LS_JOURNAL = "ej_journal_v5";
 const lsLoad = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
+const lsSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error(e); } };
 
 const calcRR = (dir, entry, sl, tp) => {
   entry = parseFloat(entry); sl = parseFloat(sl); tp = parseFloat(tp);
@@ -604,62 +560,21 @@ const NOTION_TRADES = [
 
 export default function TradingJournal() {
   const [tab, setTab] = useState("dashboard");
-  const [trades, setTrades] = useState([]);
-  const [journal, setJournal] = useState([]);
-  const [loading, setLoading] = useState(true);
+
+  // ── State: load from localStorage immediately ──────────────────────────
+  const [trades, setTrades] = useState(() => {
+    const saved = lsLoad(LS_TRADES, null);
+    if (saved !== null) return saved;
+    // First time: inject seed trades
+    localStorage.setItem("ej_seed_done", "1");
+    return NOTION_TRADES;
+  });
+  const [journal, setJournal] = useState(() => lsLoad(LS_JOURNAL, []));
   const [syncStatus, setSyncStatus] = useState("synced");
-  const saveTimer = useRef({});
 
-  // ── Load from Supabase on mount ──────────────────────────────────────────
-  const loadedRef = useRef(false);
-
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        // Load trades from Supabase
-        let loadedTrades = await dbLoad("trades", null);
-        if (loadedTrades === null) {
-          // First time ever: check localStorage migration
-          loadedTrades = lsLoad("ej_trades_v4", []);
-        }
-        // Inject seed trades only once (tracked in localStorage)
-        if (!localStorage.getItem("ej_seed_done")) {
-          const ids = new Set(loadedTrades.map(t => t.id));
-          const seeds = NOTION_TRADES.filter(t => !ids.has(t.id));
-          if (seeds.length) loadedTrades = [...seeds, ...loadedTrades];
-          localStorage.setItem("ej_seed_done", "1");
-          // Save seeds to Supabase immediately
-          if (loadedTrades.length) await dbSave("trades", loadedTrades);
-        }
-        setTrades(loadedTrades);
-
-        let loadedJournal = await dbLoad("journal", null);
-        if (loadedJournal === null) loadedJournal = lsLoad("ej_journal_v4", []);
-        setJournal(loadedJournal);
-      } catch(e) {
-        console.error(e);
-        setSyncStatus("error");
-      }
-      // Mark load as complete — saves will now be enabled
-      loadedRef.current = true;
-      setLoading(false);
-    })();
-  }, []);
-
-  // ── Debounced save to Supabase (only after initial load) ─────────────────
-  const debouncedSave = useCallback((table, items) => {
-    if (!loadedRef.current) return; // never save during load
-    if (saveTimer.current[table]) clearTimeout(saveTimer.current[table]);
-    setSyncStatus("saving");
-    saveTimer.current[table] = setTimeout(async () => {
-      try { await dbSave(table, items); setSyncStatus("synced"); }
-      catch (e) { console.error(e); setSyncStatus("error"); }
-    }, 1200);
-  }, []);
-
-  useEffect(() => { debouncedSave("trades", trades); }, [trades]);
-  useEffect(() => { debouncedSave("journal", journal); }, [journal]);
+  // ── Auto-save to localStorage on every change ──────────────────────────
+  useEffect(() => { lsSave(LS_TRADES, trades); setSyncStatus("synced"); }, [trades]);
+  useEffect(() => { lsSave(LS_JOURNAL, journal); }, [journal]);
 
   const [tradeForm, setTradeForm] = useState(null);
   const [journalForm, setJournalForm] = useState(null);
@@ -747,20 +662,8 @@ export default function TradingJournal() {
 
   const todayJ = useMemo(() => journal.find(j => j.date === todayStr()), [journal]);
 
-  // ── Loading screen ──────────────────────────────────────────────────────
-  if (loading) return (
-    <div style={{ fontFamily: "'Inter',sans-serif", background: C.bg, minHeight: "100vh", color: C.text, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
-      <style>{CSS}</style>
-      <div style={{ width: 44, height: 44, background: `linear-gradient(135deg, ${C.accent}, #6366F1)`, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 24px rgba(59,130,246,.4)`, animation: "pulseGlow 1.8s ease-in-out infinite" }}>
-        <Activity size={20} color="white" strokeWidth={2.5} />
-      </div>
-      <div style={{ fontFamily: "'Inter Tight',sans-serif", fontSize: 13, color: C.textMid }}>Caricamento journal...</div>
-      <div style={{ fontFamily: "'Inter Tight',sans-serif", fontSize: 10, color: C.textLow }}>Sincronizzazione dal cloud ☁</div>
-    </div>
-  );
-
-  // ── Sync badge ─────────────────────────────────────────────────────────
-  const syncCfg = { synced: { color: C.win, label: "Synced ☁" }, saving: { color: C.be, label: "Salvataggio..." }, error: { color: C.loss, label: "Errore sync" } }[syncStatus];
+  // ── Sync badge config ─────────────────────────────────────────────────
+  const syncCfg = { synced: { color: C.win, label: "Saved ✓" }, saving: { color: C.be, label: "Salvataggio..." }, error: { color: C.loss, label: "Errore" } }[syncStatus] || { color: C.win, label: "Saved ✓" };
 
   return (
     <div style={{ fontFamily: "'Inter',sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
