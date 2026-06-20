@@ -17,7 +17,7 @@ import {
 const LS_TRADES = "ej_trades_v5";
 const LS_JOURNAL = "ej_journal_v5";
 const lsLoad = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
-const lsSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error(e); } };
+const lsSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e) { console.error("Storage save failed:", e); return false; } };
 
 const calcRR = (dir, entry, sl, tp) => {
   entry = parseFloat(entry); sl = parseFloat(sl); tp = parseFloat(tp);
@@ -573,7 +573,7 @@ export default function TradingJournal() {
   const [syncStatus, setSyncStatus] = useState("synced");
 
   // ── Auto-save to localStorage on every change ──────────────────────────
-  useEffect(() => { lsSave(LS_TRADES, trades); setSyncStatus("synced"); }, [trades]);
+  useEffect(() => { setSyncStatus(lsSave(LS_TRADES, trades) ? "synced" : "error"); }, [trades]);
   useEffect(() => { lsSave(LS_JOURNAL, journal); }, [journal]);
 
   const [tradeForm, setTradeForm] = useState(null);
@@ -2062,13 +2062,36 @@ function TradeFormModal({ form, setForm, onSave }) {
     }
   }, [f.trueManipulation, f.stophunt, f.smtPresent, f.po3, f.displacingClose, f.manipulation, f.candlesForIFVG, f.closeQuality, f.openLiquidity, f.irlErl]); // eslint-disable-line
 
+  const compressImage = (file, maxDim = 1000, quality = 0.6) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
   const addImage = (tf, files) => {
     const imgs = f.images[tf] || [];
     if (imgs.length >= 3) return;
     Array.from(files).slice(0, 3 - imgs.length).forEach(file => {
-      const reader = new FileReader();
-      reader.onload = e => setF(p => ({ ...p, images: { ...p.images, [tf]: [...(p.images[tf] || []), { src: e.target.result, name: file.name }] } }));
-      reader.readAsDataURL(file);
+      compressImage(file)
+        .then(dataUrl => setF(p => ({ ...p, images: { ...p.images, [tf]: [...(p.images[tf] || []), { src: dataUrl, name: file.name }] } })))
+        .catch(err => console.error("Image compression failed:", err));
     });
   };
   const removeImage = (tf, idx) => setF(p => ({ ...p, images: { ...p.images, [tf]: p.images[tf].filter((_, i) => i !== idx) } }));
