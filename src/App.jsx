@@ -13,11 +13,10 @@ import {
   ArrowUpRight, ArrowDownRight, Calendar, Flame, BarChart3
 } from "lucide-react";
 
-// ── Storage: localStorage ────────────────────────────────────────────────────
-const LS_TRADES = "ej_trades_v5";
-const LS_JOURNAL = "ej_journal_v5";
-const lsLoad = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
-const lsSave = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e) { console.error("Storage save failed:", e); return false; } };
+const LS_TRADES = "ej_trades_v4";
+const LS_JOURNAL = "ej_journal_v4";
+const load = (k, fb) => { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } };
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
 const calcRR = (dir, entry, sl, tp) => {
   entry = parseFloat(entry); sl = parseFloat(sl); tp = parseFloat(tp);
@@ -560,27 +559,31 @@ const NOTION_TRADES = [
 
 export default function TradingJournal() {
   const [tab, setTab] = useState("dashboard");
-
-  // ── State: load from localStorage immediately ──────────────────────────
   const [trades, setTrades] = useState(() => {
-    const saved = lsLoad(LS_TRADES, null);
-    if (saved !== null) return saved;
-    // First time: inject seed trades
-    localStorage.setItem("ej_seed_done", "1");
-    return NOTION_TRADES;
+    const saved = load(LS_TRADES, []);
+    // Inject Notion seed trades if not already done
+    if (!localStorage.getItem(NOTION_SEED_KEY)) {
+      const merged = [...NOTION_TRADES, ...saved];
+      return merged;
+    }
+    return saved;
   });
-  const [journal, setJournal] = useState(() => lsLoad(LS_JOURNAL, []));
-  const [syncStatus, setSyncStatus] = useState("synced");
+  const [journal, setJournal] = useState(() => load(LS_JOURNAL, []));
 
-  // ── Auto-save to localStorage on every change ──────────────────────────
-  useEffect(() => { setSyncStatus(lsSave(LS_TRADES, trades) ? "synced" : "error"); }, [trades]);
-  useEffect(() => { lsSave(LS_JOURNAL, journal); }, [journal]);
-
+  // Mark seed as injected after first render
+  useEffect(() => {
+    if (!localStorage.getItem(NOTION_SEED_KEY)) {
+      localStorage.setItem(NOTION_SEED_KEY, "1");
+    }
+  }, []);
   const [tradeForm, setTradeForm] = useState(null);
   const [journalForm, setJournalForm] = useState(null);
   const [detailTrade, setDetailTrade] = useState(null);
   const [imgPreview, setImgPreview] = useState(null);
   const [filter, setFilter] = useState({ outcome: "", direction: "", grade: "", search: "" });
+
+  useEffect(() => save(LS_TRADES, trades), [trades]);
+  useEffect(() => save(LS_JOURNAL, journal), [journal]);
 
   const openNewTrade = useCallback(() => setTradeForm({ ...EMPTY_TRADE, id: Date.now() }), []);
   const openEditTrade = useCallback(t => setTradeForm({ ...EMPTY_TRADE, ...t }), []);
@@ -637,15 +640,20 @@ export default function TradingJournal() {
     });
     const longT = trades.filter(t => t.direction === "Long");
     const shortT = trades.filter(t => t.direction === "Short");
-    const longWR = longT.length ? ((longT.filter(t => t.outcome === "Win").length / longT.length) * 100).toFixed(0) : 0;
-    const shortWR = shortT.length ? ((shortT.filter(t => t.outcome === "Win").length / shortT.length) * 100).toFixed(0) : 0;
+    const longDecided = longT.filter(t => t.outcome !== "BE").length;
+    const shortDecided = shortT.filter(t => t.outcome !== "BE").length;
+    const longWR = longDecided ? ((longT.filter(t => t.outcome === "Win").length / longDecided) * 100).toFixed(0) : 0;
+    const shortWR = shortDecided ? ((shortT.filter(t => t.outcome === "Win").length / shortDecided) * 100).toFixed(0) : 0;
     const aplusTrades = trades.filter(t => t.setupGrade === "A+");
-    const aplusWR = aplusTrades.length ? ((aplusTrades.filter(t => t.outcome === "Win").length / aplusTrades.length) * 100).toFixed(0) : 0;
+    const aplusDecided = aplusTrades.filter(t => t.outcome !== "BE").length;
+    const aplusWR = aplusDecided ? ((aplusTrades.filter(t => t.outcome === "Win").length / aplusDecided) * 100).toFixed(0) : 0;
     const tmTrades = trades.filter(t => t.trueManipulation);
-    const tmWR = tmTrades.length ? ((tmTrades.filter(t => t.outcome === "Win").length / tmTrades.length) * 100).toFixed(0) : 0;
+    const tmDecided = tmTrades.filter(t => t.outcome !== "BE").length;
+    const tmWR = tmDecided ? ((tmTrades.filter(t => t.outcome === "Win").length / tmDecided) * 100).toFixed(0) : 0;
     const pnlList = trades.map(t => parseFloat(t.pnl_dollars)).filter(v => !isNaN(v));
     const totalPnl = pnlList.length ? pnlList.reduce((a, b) => a + b, 0) : null;
-    return { wins, losses, bes, winRate: trades.length ? ((wins / trades.length) * 100).toFixed(1) : 0, avgRR, pf, bestRR, worstRR, streak, streakType, equity, byInst, byGrade, longT, shortT, longWR, shortWR, aplusTrades, aplusWR, tmTrades, tmWR, totalPnl };
+    const decidedTrades = wins + losses; // exclude BE from winrate denominator
+    return { wins, losses, bes, winRate: decidedTrades ? ((wins / decidedTrades) * 100).toFixed(1) : 0, avgRR, pf, bestRR, worstRR, streak, streakType, equity, byInst, byGrade, longT, shortT, longWR, shortWR, aplusTrades, aplusWR, tmTrades, tmWR, totalPnl };
   }, [trades]);
 
   // ── Filtered list: recomputed only when trades or filter changes ─────────
@@ -661,9 +669,6 @@ export default function TradingJournal() {
   }), [trades, filter]);
 
   const todayJ = useMemo(() => journal.find(j => j.date === todayStr()), [journal]);
-
-  // ── Sync badge config ─────────────────────────────────────────────────
-  const syncCfg = { synced: { color: C.win, label: "Saved ✓" }, saving: { color: C.be, label: "Salvataggio..." }, error: { color: C.loss, label: "Errore" } }[syncStatus] || { color: C.win, label: "Saved ✓" };
 
   return (
     <div style={{ fontFamily: "'Inter',sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
@@ -684,45 +689,10 @@ export default function TradingJournal() {
           <button key={t.id} className={`nav-btn ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.icon}{t.label}</button>
         ))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'Inter Tight',sans-serif", fontSize: 10, color: syncCfg.color, background: `${syncCfg.color}15`, border: `1px solid ${syncCfg.color}30`, padding: "3px 8px", borderRadius: 20 }}>
-            <div style={{ width: 5, height: 5, borderRadius: "50%", background: syncCfg.color, animation: syncStatus === "saving" ? "pulseGlow 1s ease infinite" : "none" }} />
-            {syncCfg.label}
-          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'Inter Tight',sans-serif", fontSize: 11, color: C.textLow }}>
             <div className="live-dot" />
             {trades.length} trades
           </div>
-          {/* Export backup */}
-          <button className="btn-ghost" title="Esporta backup JSON" onClick={() => {
-            const data = JSON.stringify({ trades, journal, exported: new Date().toISOString() }, null, 2);
-            const blob = new Blob([data], { type: "application/json" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a"); a.href = url;
-            a.download = `edge-journal-backup-${new Date().toISOString().slice(0,10)}.json`;
-            a.click(); URL.revokeObjectURL(url);
-          }} style={{ padding: "7px 10px" }}>
-            <Upload size={13} />
-          </button>
-          {/* Import backup */}
-          <button className="btn-ghost" title="Importa backup JSON" onClick={() => {
-            const input = document.createElement("input"); input.type = "file"; input.accept = ".json";
-            input.onchange = e => {
-              const file = e.target.files[0]; if (!file) return;
-              const reader = new FileReader();
-              reader.onload = ev => {
-                try {
-                  const parsed = JSON.parse(ev.target.result);
-                  if (parsed.trades) setTrades(parsed.trades);
-                  if (parsed.journal) setJournal(parsed.journal);
-                  alert("✅ Backup importato con successo!");
-                } catch { alert("❌ File non valido."); }
-              };
-              reader.readAsText(file);
-            };
-            input.click();
-          }} style={{ padding: "7px 10px" }}>
-            <Save size={13} />
-          </button>
           <button className="btn-primary" onClick={openNewTrade}><Plus size={13} />New Trade</button>
         </div>
       </div>
@@ -793,7 +763,8 @@ const SessionHeatmap = memo(function SessionHeatmap({ trades }) {
     const sessTrades = trades.filter(t => t.session === sess);
     const wins = sessTrades.filter(t => t.outcome === "Win").length;
     const losses = sessTrades.filter(t => t.outcome === "Loss").length;
-    const wr = sessTrades.length ? Math.round(wins / sessTrades.length * 100) : null;
+    const decided = wins + losses;
+    const wr = decided ? Math.round(wins / decided * 100) : null;
     const rrList = sessTrades.map(t => getTradeRR(t)).filter(r => r !== null && !isNaN(r));
     const avgRR = rrList.length ? (rrList.reduce((a, b) => a + b, 0) / rrList.length).toFixed(1) : null;
     return { sess, total: sessTrades.length, wins, losses, wr, avgRR };
@@ -836,7 +807,8 @@ const AplusTracker = memo(function AplusTracker({ trades }) {
     const wins = gt.filter(t => t.outcome === "Win").length;
     const losses = gt.filter(t => t.outcome === "Loss").length;
     const bes = gt.filter(t => t.outcome === "BE").length;
-    const wr = Math.round(wins / gt.length * 100);
+    const decided = wins + losses;
+    const wr = decided ? Math.round(wins / decided * 100) : 0;
     const rrList = gt.map(t => getTradeRR(t)).filter(r => r !== null && !isNaN(r));
     const avgRR = rrList.length ? (rrList.reduce((a, b) => a + b, 0) / rrList.length).toFixed(1) : "—";
     return { g, total: gt.length, wins, losses, bes, wr, avgRR };
@@ -2062,36 +2034,13 @@ function TradeFormModal({ form, setForm, onSave }) {
     }
   }, [f.trueManipulation, f.stophunt, f.smtPresent, f.po3, f.displacingClose, f.manipulation, f.candlesForIFVG, f.closeQuality, f.openLiquidity, f.irlErl]); // eslint-disable-line
 
-  const compressImage = (file, maxDim = 1000, quality = 0.6) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = e => {
-      const img = new Image();
-      img.onload = () => {
-        let { width, height } = img;
-        if (width > maxDim || height > maxDim) {
-          const scale = maxDim / Math.max(width, height);
-          width = Math.round(width * scale);
-          height = Math.round(height * scale);
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = width; canvas.height = height;
-        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-
   const addImage = (tf, files) => {
     const imgs = f.images[tf] || [];
     if (imgs.length >= 3) return;
     Array.from(files).slice(0, 3 - imgs.length).forEach(file => {
-      compressImage(file)
-        .then(dataUrl => setF(p => ({ ...p, images: { ...p.images, [tf]: [...(p.images[tf] || []), { src: dataUrl, name: file.name }] } })))
-        .catch(err => console.error("Image compression failed:", err));
+      const reader = new FileReader();
+      reader.onload = e => setF(p => ({ ...p, images: { ...p.images, [tf]: [...(p.images[tf] || []), { src: e.target.result, name: file.name }] } }));
+      reader.readAsDataURL(file);
     });
   };
   const removeImage = (tf, idx) => setF(p => ({ ...p, images: { ...p.images, [tf]: p.images[tf].filter((_, i) => i !== idx) } }));
